@@ -142,7 +142,6 @@ class BalloonSegmenter:
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         out = mask.copy()
-        touch = cv2.dilate(out, np.ones((9, 9), np.uint8)) > 0
         report = []
         for box in text_boxes:
             x0, y0, x1, y1 = [int(v) for v in box]
@@ -158,6 +157,10 @@ class BalloonSegmenter:
             if region is None:
                 report.append(((x0, y0, x1, y1), round(float(cov), 2), "no-region"))
                 continue
+            # the region must join the balloon the model found (one balloon can
+            # be split into pieces); recomputed each time because an earlier
+            # completion may already have claimed the piece it touches
+            touch = cv2.dilate(out, np.ones((9, 9), np.uint8)) > 0
             if not (region.astype(bool) & touch).any():
                 report.append(((x0, y0, x1, y1), round(float(cov), 2), "not-on-balloon"))
                 continue
@@ -250,7 +253,7 @@ def main():
             imwrite_u(out_dir / f"{p.stem}_painted.jpg", painted)
         for box, cov, status in report:
             if status != "covered":
-                print(f"    text {box} coverage {cov:.2f}: {status}")
+                print(f"    {p.name} text {box} coverage {cov:.2f}: {status}")
         print(f"{p.name}: {len(found)} balloons, mask {int((final > 0).sum())} px")
 
 

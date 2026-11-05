@@ -37,6 +37,18 @@ mask, instances, mask_prob = seg.segment(image_bgr)   # mask: uint8 0/255, page 
 paint_mask = mask_for_painting(image_bgr, seg)         # hole-filled, shrunk by 3 px
 ```
 
+## Pure CV variant (no model)
+
+`pure_cv_segmentation.py` recovers balloons from the text boxes with classic
+OpenCV only (contour detection on closed ink, with a bounded growth fallback):
+
+```bash
+python pure_cv_segmentation.py samples output_cv --texts samples/texts.json --paint
+```
+
+Slower to get right than the model and less reliable on balloons whose outline
+touches other white areas; kept for comparison.
+
 ## Model I/O
 
 | | |
