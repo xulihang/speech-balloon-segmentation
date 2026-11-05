@@ -37,6 +37,31 @@ mask, instances, mask_prob = seg.segment(image_bgr)   # mask: uint8 0/255, page 
 paint_mask = mask_for_painting(image_bgr, seg)         # hole-filled, shrunk by 3 px
 ```
 
+## Java (B4J / JavaObject)
+
+`java/` is a Maven project around `com.xulihang.BalloonSegmenter`, usable from B4J
+through JavaObject (depends on onnxruntime 1.20 and OpenCV 4.9).
+
+```java
+BalloonSegmenter seg = new BalloonSegmenter("models/model_fp32.onnx");
+Mat mask = seg.getMask(pageMat, textBoxes);   // textBoxes may be null
+```
+
+```b4j
+Dim seg As JavaObject
+seg.InitializeNewInstance("com.xulihang.BalloonSegmenter", Array(modelPath))
+Dim mask As JavaObject = seg.RunMethod("getMask", Array(pageMat.JO, boxes))
+' boxes: list of maps with X, Y, width, height (also {"geometry": {...}} or [x0,y0,x1,y1])
+' mask: org.opencv.core.Mat, 0/255, page size; release it when done
+```
+
+Text boxes: `List<Map>` with `X`, `Y`, `width`, `height` (page pixels), a map with a
+`geometry` map, or `int[]`/`List` of `[x0, y0, x1, y1]`.
+
+The official model has float16 I/O; the Java project uses `models/model_fp32.onnx`
+(same weights, float32 I/O, outputs differ only by rounding). Regenerate it with
+`python java/tools/convert_to_fp32.py model_fp16.onnx model_fp32.onnx`.
+
 ## Pure CV variant (no model)
 
 `pure_cv_segmentation.py` recovers balloons from the text boxes with classic
