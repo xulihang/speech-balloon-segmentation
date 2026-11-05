@@ -5,6 +5,7 @@ import org.opencv.core.*;
 import org.opencv.imgproc.Imgproc;
 
 import java.nio.FloatBuffer;
+import java.nio.ShortBuffer;
 import java.nio.file.Paths;
 import java.util.*;
 
@@ -12,11 +13,9 @@ import java.util.*;
  * bubble-pop 气泡分割 ONNX 推理器 (漫画/多格漫画的对话气泡)
  *
  * 模型: https://github.com/letmutex/bubble-pop (MobileNetV3-Small UNet, Apache-2.0)
- *   官方文件是 float16 输入; 这里用 models/model_fp32.onnx
- *   (同一权重, 输入输出改成 float32, 见 tools/convert_to_fp32.py)
- *   输入:  image  [1, 1024, 768, 1]  float32
+ *   输入:  image  [1, 1024, 768, 1]  float16 (官方 model_fp16.onnx) 或 float32
  *          灰度, letterbox 到 768x1024 (白边), (v/255 - 0.449) / 0.226
- *   输出:  logits [1, 1024, 768, 3]  float32, 依次为 mask / boundary / confidence
+ *   输出:  logits [1, 1024, 768, 3]  与输入同精度, 依次为 mask / boundary / confidence
  *
  * 后处理 (与 bubble-pop 的 inference.py 一致):
  *   1. sigmoid, mask >= 0.5 取前景
@@ -51,6 +50,7 @@ public class BalloonSegmenter {
     private final OrtSession session;
     private final String inputName;
     private final String outputName;
+    private final boolean fp16;
 
     private float scoreThreshold = 0.65f;
     private int shrink = 3;
@@ -65,10 +65,11 @@ public class BalloonSegmenter {
         Map<String, NodeInfo> inputs = session.getInputInfo();
         inputName = inputs.keySet().iterator().next();
         ValueInfo info = inputs.get(inputName).getInfo();
-        if (info instanceof TensorInfo && ((TensorInfo) info).type != OnnxJavaType.FLOAT) {
-            throw new IllegalArgumentException("model input must be float32 (" + ((TensorInfo) info).type
-                    + "); use models/model_fp32.onnx");
+        OnnxJavaType inputType = info instanceof TensorInfo ? ((TensorInfo) info).type : OnnxJavaType.FLOAT;
+        if (inputType != OnnxJavaType.FLOAT && inputType != OnnxJavaType.FLOAT16) {
+            throw new IllegalArgumentException("unsupported model input type " + inputType);
         }
+        fp16 = inputType == OnnxJavaType.FLOAT16;
         Map<String, NodeInfo> outputs = session.getOutputInfo();
         outputName = outputs.keySet().iterator().next();
     }
@@ -215,26 +216,36 @@ public class BalloonSegmenter {
         }
 
         long[] shape = {1, HEIGHT, WIDTH, 1};
-        Object raw;
+        float[] logits;
         try (OnnxTensor input = createInput(values, shape);
              OrtSession.Result result = session.run(Collections.singletonMap(inputName, input))) {
-            raw = result.get(outputName)
-                    .orElseThrow(() -> new IllegalStateException("missing output " + outputName))
-                    .getValue();
+            OnnxValue value = result.get(outputName)
+                    .orElseThrow(() -> new IllegalStateException("missing output " + outputName));
+            if (fp16) {
+                ShortBuffer buffer = ((OnnxTensor) value).getShortBuffer();
+                logits = new float[buffer.remaining()];
+                for (int i = 0; i < logits.length; i++) {
+                    logits[i] = halfToFloat(buffer.get(i));
+                }
+            } else {
+                FloatBuffer buffer = ((OnnxTensor) value).getFloatBuffer();
+                logits = new float[buffer.remaining()];
+                buffer.get(logits);
+            }
         } catch (OrtException e) {
             throw new RuntimeException("inference failed: " + e.getMessage(), e);
         }
-        // onnxruntime 的张量按维度给出嵌套数组: [1, height, width, 3]
-        float[][] planeLogits = flatten(raw);
+        // [1, HEIGHT, WIDTH, 3] 摊平后, 第 (y*WIDTH + x)*3 + c 个值是 (x, y) 的通道 c
+        final int channels = 3;
         Mat plane = new Mat(rh, rw, CvType.CV_32FC1);
         float[] planeData = new float[rh * rw];
         plane.put(0, 0, planeData);
-        for (int c = 0; c < 3; c++) {
+        for (int c = 0; c < channels; c++) {
             int k = 0;
             for (int y = 0; y < rh; y++) {
-                int base = (y + padY) * WIDTH + padX;
+                int base = ((y + padY) * WIDTH + padX) * channels + c;
                 for (int x = 0; x < rw; x++) {
-                    planeData[k++] = planeLogits[base + x][c];
+                    planeData[k++] = logits[base + x * channels];
                 }
             }
             plane.put(0, 0, planeData);
@@ -251,51 +262,57 @@ public class BalloonSegmenter {
         plane.release();
     }
 
+    /** 输入张量: 模型是 float16 时把数值转成半精度 short。 */
     private OnnxTensor createInput(float[] values, long[] shape) throws OrtException {
-        return OnnxTensor.createTensor(env, FloatBuffer.wrap(values), shape);
+        if (!fp16) {
+            return OnnxTensor.createTensor(env, FloatBuffer.wrap(values), shape);
+        }
+        short[] half = new short[values.length];
+        for (int i = 0; i < values.length; i++) {
+            half[i] = toHalf(values[i]);
+        }
+        return OnnxTensor.createTensor(env, ShortBuffer.wrap(half), shape, OnnxJavaType.FLOAT16);
     }
 
-    /**
-     * 把 onnxruntime 的张量数组摊平成 [最后两维] 的 float 表, 不依赖维度个数。
-     * 输入 [1, H, W, C]: 结果是 [H*W][C]; 输入 [1, H, W]: [H*W][1]。
-     */
-    @SuppressWarnings("unchecked")
-    private static float[][] flatten(Object tensor) {
-        Object current = tensor;
-        while (current instanceof Object[]) {
-            Object[] arr = (Object[]) current;
-            if (arr.length == 1) {
-                current = arr[0];
-                continue;
-            }
-            if (arr[0] instanceof float[][]) {
-                float[][][] rows = (float[][][]) arr;
-                int h = rows.length;
-                int w = rows[0].length;
-                int c = rows[0][0].length;
-                float[][] flat = new float[h * w][c];
-                for (int y = 0; y < h; y++) {
-                    for (int x = 0; x < w; x++) {
-                        flat[y * w + x] = rows[y][x];
-                    }
-                }
-                return flat;
-            }
-            if (arr[0] instanceof float[]) {
-                float[][] rows = (float[][]) arr;
-                int h = rows.length;
-                int w = rows[0].length;
-                float[][] flat = new float[h * w][1];
-                for (int y = 0; y < h; y++) {
-                    for (int x = 0; x < w; x++) {
-                        flat[y * w + x][0] = rows[y][x];
-                    }
-                }
-                return flat;
-            }
-            current = arr[0];
+    /** IEEE 754 binary16 转换 (Java 8 没有 Float.floatToFloat16)。 */
+    static short toHalf(float value) {
+        int bits = Float.floatToRawIntBits(value);
+        int sign = (bits >>> 16) & 0x8000;
+        int exp = (bits >>> 23) & 0xFF;
+        int mant = bits & 0x7FFFFF;
+        if (exp == 255) {
+            return (short) (sign | 0x7C00 | (mant >>> 13));
         }
-        throw new IllegalStateException("unexpected tensor layout");
+        int e = exp - 127 + 15;
+        if (e >= 31) {
+            return (short) (sign | 0x7C00);
+        }
+        if (e <= 0) {
+            if (e < -10) {
+                return (short) sign;
+            }
+            mant |= 0x800000;
+            int shift = 14 - e;
+            int rounded = (mant + (1 << (shift - 1))) >>> shift;
+            return (short) (sign | rounded);
+        }
+        return (short) (sign | (e << 10) | (mant >>> 13));
+    }
+
+    static float halfToFloat(short h) {
+        int bits = h & 0xFFFF;
+        int sign = (bits >>> 15) & 1;
+        int exp = (bits >>> 10) & 0x1F;
+        int mant = bits & 0x3FF;
+        float f;
+        if (exp == 0) {
+            f = (float) (mant * Math.pow(2, -24));
+        } else if (exp == 31) {
+            f = Float.NaN;
+        } else {
+            f = (float) ((1.0 + mant / 1024.0) * Math.pow(2, exp - 15));
+        }
+        return sign == 1 ? -f : f;
     }
 
     private static void sigmoid(Mat mat) {

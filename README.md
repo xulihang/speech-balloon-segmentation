@@ -43,9 +43,14 @@ paint_mask = mask_for_painting(image_bgr, seg)         # hole-filled, shrunk by 
 through JavaObject (depends on onnxruntime 1.20 and OpenCV 4.9).
 
 ```java
-BalloonSegmenter seg = new BalloonSegmenter("models/model_fp32.onnx");
+BalloonSegmenter seg = new BalloonSegmenter("models/model_fp16.onnx");   // or model_fp32.onnx
 Mat mask = seg.getMask(pageMat, textBoxes);   // textBoxes may be null
 ```
+
+Both models work: the float16 input is converted to half precision
+(`OnnxTensor.createTensor(ShortBuffer, shape, OnnxJavaType.FLOAT16)`) and the
+float16 output is decoded back to float. On capture002 with the sample text
+boxes: 65406 px (fp16, 233 ms) vs 65415 px (fp32, 262 ms).
 
 ```b4j
 Dim seg As JavaObject
@@ -58,8 +63,8 @@ Dim mask As JavaObject = seg.RunMethod("getMask", Array(pageMat.JO, boxes))
 Text boxes: `List<Map>` with `X`, `Y`, `width`, `height` (page pixels), a map with a
 `geometry` map, or `int[]`/`List` of `[x0, y0, x1, y1]`.
 
-The official model has float16 I/O; the Java project uses `models/model_fp32.onnx`
-(same weights, float32 I/O, outputs differ only by rounding). Regenerate it with
+`models/model_fp32.onnx` is optional: the same weights with float32 I/O, for
+environments where half precision is awkward. Regenerate it with
 `python java/tools/convert_to_fp32.py model_fp16.onnx model_fp32.onnx`.
 
 ## Pure CV variant (no model)
