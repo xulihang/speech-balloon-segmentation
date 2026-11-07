@@ -52,6 +52,12 @@ Both models work: the float16 input is converted to half precision
 float16 output is decoded back to float. On capture002 with the sample text
 boxes: 65406 px (fp16, 233 ms) vs 65415 px (fp32, 262 ms).
 
+Text boxes only complete balloons: a box is used when at least a fifth of it
+lies on the model mask (box covered < 0.9 but >= 0.2); boxes that barely touch
+the mask (sound effects, captions, page numbers) are ignored.
+`setBoxMatchCoverage(0.2)` / `setMaxBalloonGrowth(20)` tune this (the growth cap
+drops a completed white region larger than 20x the box area).
+
 ```b4j
 Dim seg As JavaObject
 seg.InitializeNewInstance("com.xulihang.BalloonSegmenter", Array(modelPath))

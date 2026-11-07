@@ -56,6 +56,10 @@ public class BalloonSegmenter {
     private int shrink = 3;
     private boolean fillHoles = true;
     private double completionCoverage = 0.9;
+    // 文本框要至少有两成落在模型找到的气泡上才用它补洞, 否则忽略 (拟声词等)
+    private double boxMatchCoverage = 0.2;
+    // 补出来的气泡轮廓面积不超过文本框面积的这么多倍 (防止白色区域漫到整个背景)
+    private double maxBalloonGrowth = 20;
 
     public BalloonSegmenter(String onnxPath) throws OrtException {
         env = OrtEnvironment.getEnvironment();
@@ -92,6 +96,16 @@ public class BalloonSegmenter {
     // 文本框覆盖率低于该比例才补洞 (默认 0.9)
     public void setCompletionCoverage(double coverage) {
         completionCoverage = Math.max(0, Math.min(1, coverage));
+    }
+
+    // 文本框与模型气泡掩膜的重合比例下限 (默认 0.2), 低于它的文本框不补洞
+    public void setBoxMatchCoverage(double coverage) {
+        boxMatchCoverage = Math.max(0, Math.min(1, coverage));
+    }
+
+    // 补出的气泡面积 / 文本框面积上限 (默认 20)
+    public void setMaxBalloonGrowth(double ratio) {
+        maxBalloonGrowth = Math.max(1, ratio);
     }
 
     /**
@@ -504,6 +518,12 @@ public class BalloonSegmenter {
         if (covered >= completionCoverage) {
             return;
         }
+        // 只有和模型气泡掩膜匹配的文本框才用来补;
+        // 拟声词 / 旁白 / 页码等没有气泡的文本与掩膜几乎不重合, 直接忽略
+        if (covered < boxMatchCoverage) {
+            return;
+        }
+        int minArea = (int) ((w * (double) h) / maxBalloonGrowth);
 
         int margin = 80;
         int wx0 = Math.max(0, x0 - margin);
@@ -534,7 +554,6 @@ public class BalloonSegmenter {
             Mat centroids = new Mat();
             int num = Imgproc.connectedComponentsWithStats(freeWhite, labels, stats, centroids, 8, CvType.CV_32S);
             freeWhite.release();
-            stats.release();
             centroids.release();
             if (num <= 1) {
                 labels.release();
@@ -560,7 +579,16 @@ public class BalloonSegmenter {
                     bestCount = e.getValue();
                 }
             }
-            if (best == 0) {
+            // 补出的区域要比一个气泡小 (文本框面积 * maxBalloonGrowth);
+            // 分量漫进整个背景时宁可返回 null, 交给下一档 gap
+            double compArea = 0;
+            try {
+                compArea = stats.get(best, 0)[0];
+            } catch (RuntimeException ignored) {
+                // 标签不在窗口内 (理论上不会)
+            }
+            stats.release();
+            if (best == 0 || compArea > maxBalloonGrowth * w * h) {
                 continue;
             }
             byte[] compData = new byte[ww * wh];

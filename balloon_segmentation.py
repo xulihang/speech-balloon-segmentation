@@ -45,6 +45,10 @@ MIN_AREA = 60
 MIN_SCORE = 0.65          # instances below this score (mask + confidence) / 2 are dropped
 SHRINK = 3                # px the mask is eroded before painting, keeps the drawn outline
 COVERAGE_MIN = 0.90       # a text box covered less than this gets completed
+MATCH_COVERAGE = 0.20     # a text box must overlap the model mask at least this much
+                          # to be completed: sound effects / captions / page numbers
+                          # sit on no balloon and are ignored
+MAX_GROWTH = 20.0         # completed region <= box area * MAX_GROWTH
 
 
 def fill_holes(mask):
@@ -131,13 +135,16 @@ class BalloonSegmenter:
                              interpolation=cv2.INTER_LINEAR) for c in range(3)]
         return tuple(planes)
 
-    def complete_with_texts(self, bgr, mask, text_boxes, coverage_min=COVERAGE_MIN):
+    def complete_with_texts(self, bgr, mask, text_boxes, coverage_min=COVERAGE_MIN,
+                            match_coverage=MATCH_COVERAGE):
         """Add the white areas of balloons the mask under-covers.
 
-        For every text box (x0, y0, x1, y1) whose area the mask covers less than
-        `coverage_min`, take the white region the text sits in and add it when
-        it touches the mask (one balloon split into pieces) and stays of balloon
-        size.  Returns (mask, report) with report = [(box, coverage, status)].
+        Only text boxes that match a balloon are used: a box the mask covers
+        less than `coverage_min` but at least `match_coverage` gets the white
+        region the text sits in added, when that region touches the mask (one
+        balloon split into pieces) and stays of balloon size.  Boxes that barely
+        overlap the mask (sound effects, captions) are ignored.
+        Returns (mask, report) with report = [(box, coverage, status)].
         """
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
@@ -152,6 +159,9 @@ class BalloonSegmenter:
             cov = (out[y0:y1 + 1, x0:x1 + 1] > 0).mean()
             if cov >= coverage_min:
                 report.append(((x0, y0, x1, y1), round(float(cov), 2), "covered"))
+                continue
+            if cov < match_coverage:
+                report.append(((x0, y0, x1, y1), round(float(cov), 2), "not-matched"))
                 continue
             region = cvseg.white_region(gray, (x0, y0, x1, y1))
             if region is None:
